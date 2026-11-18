@@ -1,0 +1,184 @@
+name: build
+
+# Every 2 hours: take the newest upstream Wireless Battery release that has been out for 12 hours,
+# add the auto-update patch, build, test and publish it here. mytoolkit.ru mirrors and signs it.
+on:
+  schedule:
+    - cron: "23 */2 * * *"
+  push:
+    branches: [main, dev]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Upstream tag to build (vX.Y.Z); empty = automatic"
+        required: false
+      force:
+        description: "Build even if this version is already released"
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  pick:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write  # keepalive commit only
+    outputs:
+      tag: ${{ steps.pick.outputs.tag }}
+      version: ${{ steps.pick.outputs.version }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 1
+
+      - name: Pick upstream release
+        id: pick
+        env:
+          GH_TOKEN: ${{ github.token }}
+          DELAY_HOURS: "12"
+          FORCE_TAG: ${{ inputs.tag }}
+          # On the dev branch always rebuild (test builds, never published).
+          FORCE: ${{ inputs.force || github.ref == 'refs/heads/dev' }}
+        run: python3 .github/pick.py
+
+      # GitHub pauses scheduled workflows after 60 days without commits; upstream may be quiet that long.
+      - name: Keepalive
+        if: github.event_name == 'schedule'
+        run: |
+          last=$(git log -1 --format=%ct); now=$(date +%s)
+          if [ $((now - last)) -gt $((50 * 86400)) ]; then
+            date -u +%F > .github/keepalive
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git add .github/keepalive && git commit -m "keepalive" && git push
+          fi
+
+  build:
+    needs: pick
+    if: needs.pick.outputs.tag != ''
+    runs-on: windows-latest
+    permissions:
+      contents: write
+    env:
+      TAG: ${{ needs.pick.outputs.tag }}
+      VERSION: ${{ needs.pick.outputs.version }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          path: tk
+
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          repository: krisgfx9/Wireless-Device-Battery-Monitor
+          ref: ${{ needs.pick.outputs.tag }}
+          path: up
+          persist-credentials: false
+
+      - name: Add auto-update
+        shell: pwsh
+        run: python tk/patch/apply.py up $env:VERSION
+
+      - uses: msys2/setup-msys2@ec48f7c5447b3140e2b088413ae3a55687bccb6e # v2
+        with:
+          msystem: MINGW64
+          install: mingw-w64-x86_64-gcc make
+
+      - name: Build WirelessBattery.exe
+        shell: msys2 {0}
+        working-directory: up
+        run: make
+
+      - name: Upstream tests
+        shell: msys2 {0}
+        working-directory: up
+        run: make test
+
+      - name: Auto-update tests
+        shell: msys2 {0}
+        run: |
+          g++ -std=c++17 -O2 -Wall -D_WIN32_WINNT=0x0A00 -DWINVER=0x0A00 -municode -Iup/src \
+            tk/patch/tk_test.cpp up/src/tk_update.cpp -o tk_test.exe -lwinhttp -lbcrypt
+          ./tk_test.exe
+
+      - name: The updater is inside the exe
+        shell: pwsh
+        working-directory: up
+        run: |
+          $b = [IO.File]::ReadAllBytes("WirelessBattery.exe")
+          $u = [Text.Encoding]::Unicode
+          $t = $u.GetString($b) + $u.GetString($b, 1, $b.Length - 1)
+          foreach ($s in "/files/programmy/wireless-battery/", "WirelessBattery-tk/") {
+            if (-not $t.Contains($s)) { throw "missing in exe: $s" }
+          }
+          if (-not ([Text.Encoding]::UTF8.GetString($b)).Contains("Обновлять автоматически")) { throw "Russian menu text missing" }
+
+      - name: Install Inno Setup
+        shell: pwsh
+        run: choco install innosetup --no-progress -y
+
+      - name: Build installer
+        shell: pwsh
+        working-directory: up
+        run: ./installer/build-installer.ps1 -Version $env:VERSION
+
+      # What a user's PC does on update: silent install over a running copy, which must come back.
+      - name: Silent update smoke test
+        shell: pwsh
+        run: |
+          $setup = "up/dist/WirelessBattery-Setup-$env:VERSION.exe"
+          $args1 = '/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART', '/SP-', '/TKUPDATE=1', '/MERGETASKS="!autostart"'
+          $p = Start-Process $setup -ArgumentList $args1 -Wait -PassThru
+          if ($p.ExitCode -ne 0) { throw "first install: exit $($p.ExitCode)" }
+          Start-Sleep 4
+          $a = Get-Process WirelessBattery -ErrorAction SilentlyContinue
+          if (-not $a) { throw "app did not start after the silent install" }
+          $key = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\{7E0B5C2A-3F4D-4C8E-9B61-2D5A8F1C4E93}_is1'
+          $loc = (Get-ItemProperty $key).InstallLocation
+          Write-Host "installed to $loc"
+          if (-not (Test-Path (Join-Path $loc 'TK_MODIFICATIONS.txt'))) { throw "TK_MODIFICATIONS.txt not installed" }
+          if (Get-ItemProperty 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run' -Name WirelessBattery -ErrorAction SilentlyContinue) { throw "autostart was turned on" }
+          $p = Start-Process $setup -ArgumentList $args1 -Wait -PassThru
+          if ($p.ExitCode -ne 0) { throw "update over a running copy: exit $($p.ExitCode)" }
+          Start-Sleep 4
+          $b = Get-Process WirelessBattery -ErrorAction SilentlyContinue
+          if (-not $b) { throw "app did not come back after the update" }
+          if ($b.Id -contains $a.Id) { throw "the old process was not closed" }
+          Stop-Process -Name WirelessBattery -Force
+
+      - name: Sources (GPL)
+        shell: pwsh
+        run: |
+          Invoke-WebRequest https://github.com/Sapd/HeadsetControl/releases/download/4.3.0/headsetcontrol-4.3.0.tar.gz -OutFile up/dist/headsetcontrol-4.3.0.tar.gz
+          if ((Get-FileHash up/dist/headsetcontrol-4.3.0.tar.gz -Algorithm SHA256).Hash -ne '918dcacf8aef347744b36b2d259d76880fa64b3869f0f8ef26b6576b873d28a7') { throw 'checksum mismatch' }
+          tar -czf "wireless-battery-$env:VERSION-source.tar.gz" --exclude=./build --exclude=./dist --exclude=./third_party --exclude=./.git --exclude=./WirelessBattery.exe -C up .
+          Move-Item "wireless-battery-$env:VERSION-source.tar.gz" up/dist/
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: WirelessBattery-${{ needs.pick.outputs.version }}
+          path: |
+            up/dist/WirelessBattery-Setup-*.exe
+            up/dist/wireless-battery-*-source.tar.gz
+
+      - name: Publish release
+        if: github.ref == 'refs/heads/main'
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $up = "https://github.com/krisgfx9/Wireless-Device-Battery-Monitor/releases/tag/$env:TAG"
+          $notes = @(
+            "Wireless Battery $env:TAG (автор — krisgfx9) со встроенным автообновлением, сборка для mytoolkit.ru.",
+            "Что нового у автора: $up",
+            "",
+            "Wireless Battery $env:TAG by krisgfx9 with silent auto-update (mytoolkit.ru build). Upstream changes: $up"
+          ) -join "`n"
+          gh release create "v$env:VERSION" --repo $env:GITHUB_REPOSITORY --target $env:GITHUB_SHA `
+            --title "Wireless Battery $env:VERSION" --notes $notes `
+            "up/dist/WirelessBattery-Setup-$env:VERSION.exe" "up/dist/wireless-battery-$env:VERSION-source.tar.gz" "up/dist/headsetcontrol-4.3.0.tar.gz"
