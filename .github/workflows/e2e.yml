@@ -1,0 +1,86 @@
+name: end-to-end update
+
+# A real update, as on a user's PC: install a build numbered just below the one on mytoolkit.ru,
+# start it, and wait until it has found, verified and installed the newer version by itself.
+on:
+  workflow_dispatch:
+  push:
+    branches: [dev]
+    paths: [".github/workflows/e2e.yml"]
+
+permissions:
+  contents: read
+
+jobs:
+  e2e:
+    runs-on: windows-latest
+    timeout-minutes: 40
+    steps:
+      - name: What mytoolkit.ru offers now
+        id: live
+        shell: pwsh
+        run: |
+          $m = Invoke-RestMethod https://mytoolkit.ru/files/programmy/wireless-battery/latest.json
+          $v = [version]$m.version
+          if ($v.Revision -lt 1) { throw "unexpected version $($m.version)" }
+          $old = "{0}.{1}.{2}.{3}" -f $v.Major, $v.Minor, $v.Build, ($v.Revision - 1)
+          "live=$($m.version)" >> $env:GITHUB_OUTPUT
+          "old=$old" >> $env:GITHUB_OUTPUT
+          "tag=v$($m.upstream.TrimStart('v'))" >> $env:GITHUB_OUTPUT
+          Write-Host "live $($m.version), test build $old from $($m.upstream)"
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          path: tk
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          repository: krisgfx9/Wireless-Device-Battery-Monitor
+          ref: ${{ steps.live.outputs.tag }}
+          path: up
+          persist-credentials: false
+      - name: Older build
+        shell: pwsh
+        run: python tk/patch/apply.py up ${{ steps.live.outputs.old }}
+      - uses: msys2/setup-msys2@ec48f7c5447b3140e2b088413ae3a55687bccb6e # v2
+        with:
+          msystem: MINGW64
+          install: mingw-w64-x86_64-gcc make
+      - shell: msys2 {0}
+        working-directory: up
+        run: make
+      - name: Installer
+        shell: pwsh
+        working-directory: up
+        run: |
+          choco install innosetup --no-progress -y
+          ./installer/build-installer.ps1 -Version ${{ steps.live.outputs.old }}
+      - name: Install the older build and start it like a user
+        shell: pwsh
+        run: |
+          $p = Start-Process "up/dist/WirelessBattery-Setup-${{ steps.live.outputs.old }}.exe" -ArgumentList '/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART','/SP-','/MERGETASKS="!autostart"' -PassThru
+          $p.WaitForExit()
+          if ($p.ExitCode -ne 0) { throw "setup exit $($p.ExitCode)" }
+          $exe = Join-Path $env:LOCALAPPDATA "Programs\Wireless Battery\WirelessBattery.exe"
+          Start-Process $exe
+          Start-Sleep 3
+          if (-not (Get-Process WirelessBattery -ErrorAction SilentlyContinue)) { throw "app is not running" }
+      - name: Wait for the app to update itself
+        shell: pwsh
+        run: |
+          $key = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\{7E0B5C2A-3F4D-4C8E-9B61-2D5A8F1C4E93}_is1'
+          $first = (Get-Process WirelessBattery).Id
+          $want = '${{ steps.live.outputs.live }}'
+          for ($i = 0; $i -lt 60; $i++) {
+            Start-Sleep 10
+            $ver = (Get-ItemProperty $key).DisplayVersion
+            $proc = Get-Process WirelessBattery -ErrorAction SilentlyContinue
+            Write-Host ("{0,4}s  installed {1}  process {2}" -f (($i + 1) * 10), $ver, ($proc.Id -join ','))
+            if ($ver -eq $want -and $proc -and ($proc.Id -notcontains $first)) {
+              $s = Get-ItemProperty HKCU:\Software\WirelessBattery
+              Write-Host "updated to $ver by itself and restarted; tried=$($s.TkUpdateTried) tries=$($s.TkUpdateTries)"
+              if (Get-ItemProperty 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run' -Name WirelessBattery -ErrorAction SilentlyContinue) { throw "autostart was turned on" }
+              exit 0
+            }
+          }
+          Get-ChildItem "$env:TEMP\WirelessBattery-update" -ErrorAction SilentlyContinue | Format-Table Name, Length
+          Get-ItemProperty HKCU:\Software\WirelessBattery -ErrorAction SilentlyContinue | Format-List
+          throw "the app did not update itself in 10 minutes"
