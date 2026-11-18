@@ -75,50 +75,62 @@ function TaskbarCrop($name, $r) {
 
 # Try a bigger desktop; the default runner screen is small.
 try { Set-DisplayResolution -Width 1920 -Height 1080 -Force -ErrorAction Stop } catch { Write-Host "resolution unchanged: $_" }
-Write-Host ("screen {0}x{1}" -f [W]::GetSystemMetrics(0), [W]::GetSystemMetrics(1))
-FullShot "debug-desktop"
+$SW = [W]::GetSystemMetrics(0); $SH = [W]::GetSystemMetrics(1)
+Write-Host ("screen {0}x{1}" -f $SW, $SH)
+
+# A plain window over the work area hides the runner's console and the "Test Mode" text on the desktop.
+$script:cover = $null
+function Cover($color) {
+  if ($script:cover) { Stop-Process -Id $script:cover.Id -Force -ErrorAction SilentlyContinue; Start-Sleep 1 }
+  $code = "Add-Type -AssemblyName System.Windows.Forms,System.Drawing; " +
+    "`$f = New-Object Windows.Forms.Form; `$f.FormBorderStyle = 'None'; `$f.ShowInTaskbar = `$false; `$f.StartPosition = 'Manual'; " +
+    "`$f.Bounds = [Windows.Forms.Screen]::PrimaryScreen.WorkingArea; `$f.BackColor = [Drawing.ColorTranslator]::FromHtml('$color'); " +
+    "[Windows.Forms.Application]::Run(`$f)"
+  $script:cover = Start-Process powershell -ArgumentList '-NoProfile', '-Command', $code -PassThru
+  Start-Sleep 3
+}
+# Scenes are the bottom-right 800x500 of the screen: the taskbar with the widget and whatever pops up above it.
+function Scene($name) { Shot $name ($SW - 800) ($SH - 500) $SW $SH }
+function Hover($r) { [W]::SetCursorPos([int](($r.L + $r.R) / 2), [int](($r.T + $r.B) / 2)) | Out-Null; Start-Sleep 3 }
+function Away { [W]::SetCursorPos(10, 10) | Out-Null; Start-Sleep 1 }
 
 $main = "demo:logi", "razer:demo", "xbox:demo", "coolermaster:demo", "steam:demo"
-Theme 0
+$brands = "razer:demo", "demo:logi", "steelseries:demo", "hyperx:demo", "bt:demo-ps", "xbox:demo"
+FullShot "debug-desktop"
+
+# Light first: the runner starts with a light taskbar, and switching back to light is not reliable.
+$p = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Themes\Personalize"
+New-Item $p -Force | Out-Null
+Set-ItemProperty $p SystemUsesLightTheme 1 -Type DWord
+Set-ItemProperty $p AppsUseLightTheme 1 -Type DWord
+Cover "#e6eaf0"
 $r = Run $main @()
-TaskbarCrop "taskbar-dark" $r
+Hover $r; Scene "light-tooltip"; Away
+$r = Run $brands @("BrandColors")
+Scene "light-brands"
 
-# Tooltip: hover the widget
+Theme 0
+Cover "#1d2733"
+$r = Run $main @()
+Scene "dark-plain"
+Hover $r; Scene "dark-tooltip"; Away
+$r = Run $brands @("BrandColors")
+Scene "dark-brands"
+$r = Run $main @("StackedLayout")
+Scene "dark-stacked"
+$r = Run $main @()
 [W]::SetCursorPos([int](($r.L + $r.R) / 2), [int](($r.T + $r.B) / 2)) | Out-Null
-Start-Sleep 3
-$tips = New-Object System.Collections.ArrayList
-[W]::EnumWindows({ param($h, $l) $s = New-Object Text.StringBuilder 64; [W]::GetClassName($h, $s, 64) | Out-Null; if ($s.ToString() -eq "tooltips_class32" -and [W]::IsWindowVisible($h)) { [void]$tips.Add($h) }; $true }, [IntPtr]::Zero) | Out-Null
-if ($tips.Count) {
-  $t = Rect $tips[0]
-  $tb = Rect ([W]::FindWindow("Shell_TrayWnd", $null))
-  Shot "tooltip" ([Math]::Min($t.L, $r.L) - 24) ($t.T - 16) ([W]::GetSystemMetrics(0)) $tb.B
-} else { Write-Host "no tooltip" }
-
-# Tray menu: click the widget
+Start-Sleep 1
 [W]::mouse_event(0x2, 0, 0, 0, [IntPtr]::Zero); [W]::mouse_event(0x4, 0, 0, 0, [IntPtr]::Zero)
 Start-Sleep 2
 $menu = [W]::FindWindow("#32768", $null)
 if ($menu -ne [IntPtr]::Zero) {
   $m = Rect $menu
-  $tb = Rect ([W]::FindWindow("Shell_TrayWnd", $null))
-  Shot "menu" ($m.L - 24) ($m.T - 16) ([Math]::Max($m.R, $r.R) + 24) $tb.B
+  Shot "dark-menu" ($SW - 800) ($m.T - 20) $SW $SH
   [W]::keybd_event(0x1B, 0, 0, [IntPtr]::Zero); [W]::keybd_event(0x1B, 0, 2, [IntPtr]::Zero)
 } else { FullShot "debug-nomenu"; Write-Host "no menu" }
-[W]::SetCursorPos(10, 10) | Out-Null
-
-$brands = "razer:demo", "demo:logi", "steelseries:demo", "hyperx:demo", "bt:demo-ps", "xbox:demo"
-$r = Run $brands @("BrandColors")
-TaskbarCrop "brands-dark" $r
-
-$r = Run $main @("StackedLayout")
-TaskbarCrop "stacked-dark" $r
-
-Theme 1
-$r = Run $main @()
-TaskbarCrop "taskbar-light" $r
-$r = Run $brands @("BrandColors")
-TaskbarCrop "brands-light" $r
-FullShot "debug-light"
+FullShot "debug-dark"
 
 Get-Process WirelessBattery -ErrorAction SilentlyContinue | Stop-Process -Force
+if ($script:cover) { Stop-Process -Id $script:cover.Id -Force -ErrorAction SilentlyContinue }
 Get-ChildItem $out | Format-Table Name, Length
