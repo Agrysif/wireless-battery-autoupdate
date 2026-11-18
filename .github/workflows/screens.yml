@@ -19,6 +19,7 @@ permissions:
 jobs:
   screens:
     runs-on: windows-latest
+    timeout-minutes: 40
     env:
       TAG: ${{ inputs.tag || 'v1.0.8' }}
     steps:

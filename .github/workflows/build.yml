@@ -63,6 +63,7 @@ jobs:
     needs: pick
     if: needs.pick.outputs.tag != ''
     runs-on: windows-latest
+    timeout-minutes: 40
     permissions:
       contents: write
     env:
@@ -130,11 +131,14 @@ jobs:
       # What a user's PC does on update: silent install over a running copy, which must come back.
       - name: Silent update smoke test
         shell: pwsh
+        timeout-minutes: 5
         run: |
+          # WaitForExit, not Start-Process -Wait: -Wait also waits for the app the installer starts.
+          function Setup($a) { $p = Start-Process $setup -ArgumentList $a -PassThru; $p.WaitForExit(); $p.ExitCode }
           $setup = "up/dist/WirelessBattery-Setup-$env:VERSION.exe"
           $args1 = '/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART', '/SP-', '/TKUPDATE=1', '/MERGETASKS="!autostart"'
-          $p = Start-Process $setup -ArgumentList $args1 -Wait -PassThru
-          if ($p.ExitCode -ne 0) { throw "first install: exit $($p.ExitCode)" }
+          $code = Setup $args1
+          if ($code -ne 0) { throw "first install: exit $code" }
           Start-Sleep 4
           $a = Get-Process WirelessBattery -ErrorAction SilentlyContinue
           if (-not $a) { throw "app did not start after the silent install" }
@@ -143,8 +147,8 @@ jobs:
           Write-Host "installed to $loc"
           if (-not (Test-Path (Join-Path $loc 'TK_MODIFICATIONS.txt'))) { throw "TK_MODIFICATIONS.txt not installed" }
           if (Get-ItemProperty 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run' -Name WirelessBattery -ErrorAction SilentlyContinue) { throw "autostart was turned on" }
-          $p = Start-Process $setup -ArgumentList $args1 -Wait -PassThru
-          if ($p.ExitCode -ne 0) { throw "update over a running copy: exit $($p.ExitCode)" }
+          $code = Setup $args1
+          if ($code -ne 0) { throw "update over a running copy: exit $code" }
           Start-Sleep 4
           $b = Get-Process WirelessBattery -ErrorAction SilentlyContinue
           if (-not $b) { throw "app did not come back after the update" }
