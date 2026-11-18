@@ -102,7 +102,7 @@ jobs:
       - name: Auto-update tests
         shell: msys2 {0}
         run: |
-          g++ -std=c++17 -O2 -Wall -D_WIN32_WINNT=0x0A00 -DWINVER=0x0A00 -municode -Iup/src \
+          g++ -std=c++17 -O2 -Wall -D_WIN32_WINNT=0x0A00 -DWINVER=0x0A00 -Iup/src \
             tk/patch/tk_test.cpp up/src/tk_update.cpp -o tk_test.exe -lwinhttp -lbcrypt
           ./tk_test.exe
 
