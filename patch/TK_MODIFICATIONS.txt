@@ -1,0 +1,22 @@
+Wireless Battery — build with automatic updates (mytoolkit.ru)
+==============================================================
+
+This is a MODIFIED version of Wireless Battery by krisgfx9 and contributors
+(https://github.com/krisgfx9/Wireless-Device-Battery-Monitor), licensed under the
+GNU General Public License v3.0 or later (see LICENSE.txt). It is not an official build.
+
+Modified by Agrysif for mytoolkit.ru, first on 2026-11-19:
+- added src/tk_update.cpp: silent automatic updates. Every 6 hours the app downloads
+  https://mytoolkit.ru/files/programmy/wireless-battery/latest.json, checks its ECDSA P-256
+  signature, downloads the installer it names, checks the installer's SHA-256 and runs it silently.
+  Nothing about you or your devices is sent. Only per-user installs update themselves.
+- added the tray menu item "Update automatically" (on by default) to turn this off;
+- the installer starts the app again after such an update and keeps your "Start with Windows" choice.
+
+Source code of this build: https://github.com/Agrysif/wireless-battery-autoupdate
+(every release there also has the complete patched source as wireless-battery-<version>-source.tar.gz).
+
+Это изменённая версия программы Wireless Battery (автор — krisgfx9), лицензия GPL-3.0.
+Изменения (с 19.11.2026): программа раз в 6 часов проверяет обновления на mytoolkit.ru,
+проверяет подпись и тихо ставит новую версию. Отключить — пункт «Обновлять автоматически»
+в меню значка. Исходный код сборки: https://github.com/Agrysif/wireless-battery-autoupdate
